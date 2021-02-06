@@ -71,7 +71,10 @@ export class WhatsappClient {
                         restartOnAuthFail: false,
                         takeoverTimeoutMs: 5000,
                         takeoverOnConflict: true,
-                        puppeteer: { args: ['--no-sandbox'] }
+                        puppeteer: {
+                            args: [ '--no-sandbox' ],
+                            headless: false
+                        }
                     } );
             
             
