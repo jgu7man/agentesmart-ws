@@ -1,0 +1,21 @@
+{
+    "compilerOptions": {
+        "target": "es2017",
+        "module": "commonjs",
+        "outDir": "./dist/server",
+        "strict": true,
+        "sourceMap": true,
+        "resolveJsonModule" :true,
+        "noUnusedLocals": false,
+        "noImplicitReturns": true,
+        "strictNullChecks": false,
+        "esModuleInterop": true,
+        "typeRoots": [
+            "node_modules/@types"
+        ]
+    },
+    "exclude": [
+        "dist",
+        "node_modules"
+    ]
+}
