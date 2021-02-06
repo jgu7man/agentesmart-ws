@@ -71,6 +71,7 @@ export class WhatsappClient {
                         restartOnAuthFail: false,
                         takeoverTimeoutMs: 5000,
                         takeoverOnConflict: true,
+                        puppeteer: { args: ['--no-sandbox'] }
                     } );
             
             
@@ -94,9 +95,9 @@ export class WhatsappClient {
                             if ( qrCant === 1 && !whatsappDoc.exists ) whatsappRef.set( { status: 'DISSCONECTED' } ) 
                             
                             console.log( 'QR RECEIVED', qr );
-                            QRCode.toString( qr, { type: 'terminal' },
-                                ( err: any, url: string ) => { console.log( url ) }
-                            )
+                            // QRCode.toString( qr, { type: 'terminal' },
+                            //     ( err: any, url: string ) => { console.log( url ) }
+                            // )
                             whatsappRef.update( { qr } ) 
                             ws.send( qr )
                             
