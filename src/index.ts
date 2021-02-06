@@ -19,7 +19,7 @@ const wawebServer = connections.WhatsServer()
 
 
 wawebServer.listen(process.env.PORT || 8999, () => {
-    console.log(`Server started on port 8999`);
+    console.log(`Server started [For localhost running on port 8999]`);
 });
 
 

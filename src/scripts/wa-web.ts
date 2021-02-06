@@ -39,6 +39,7 @@ export class WhatsappClient {
                 
                 const projectId = params.split( '=' )[ 1 ]
                 console.log( 'Connecting: '+ projectId )
+                
                 const agentsQuery = await firestore
                     .collectionGroup( 'agentes' )
                     .where( 'projectId', '==', projectId )
@@ -64,7 +65,7 @@ export class WhatsappClient {
                     const session = whatsappDoc.exists ? 
                         whatsappDoc.data()[ 'session' ] ? whatsappDoc.data()[ 'session' ] : null
                         : null
-                    console.log( session )
+                    console.log( 'Running session:', session ? session : 'New')
                     const client = new Client( {
                         session: session,
                         qrTimeoutMs: 30000,
@@ -72,19 +73,21 @@ export class WhatsappClient {
                         takeoverTimeoutMs: 5000,
                         takeoverOnConflict: true,
                         puppeteer: {
-                            args: [ '--no-sandbox', '--disable-setuid-sandbox' ],
-                            headless: false
+                            args: [ '--no-sandbox', '--disable-setuid-sandbox' ]
                         }
                     } );
             
             
-            
                     client.initialize();
+                    console.log( client.info
+                        ? `Connecting session to: ${client.info}`
+                        : 'Waiting for QR scanning'
+                    )
                 
                 
                     let qrCant = 0
                     client.on( 'qr', ( qr: string ) => {
-                        qrCant += 1, console.log( qrCant )
+                        qrCant += 1
                         // Generate and scan this code with your phone
 
                         
