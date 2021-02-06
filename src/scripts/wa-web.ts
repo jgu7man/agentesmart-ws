@@ -1,5 +1,5 @@
 const { Client } = require( 'whatsapp-web.js' );
-const QRCode = require('qrcode')
+// const QRCode = require('qrcode')
 import * as http from 'http';
 import * as WebSocket from 'ws';
 import { messageType } from '../models/whatsapp.model';
