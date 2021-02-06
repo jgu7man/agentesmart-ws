@@ -72,7 +72,7 @@ export class WhatsappClient {
                         takeoverTimeoutMs: 5000,
                         takeoverOnConflict: true,
                         puppeteer: {
-                            args: [ '--no-sandbox' ],
+                            args: [ '--no-sandbox', '--disable-setuid-sandbox' ],
                             headless: false
                         }
                     } );
