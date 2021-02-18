@@ -1,0 +1,526 @@
+import { firestore } from "../firebase";
+import { ContextsClient, SessionsClient } from "@google-cloud/dialogflow";
+
+import { Response, Request } from "express";
+import { v4 as uuidv4 } from "uuid";
+import { keyFilename } from "../index";
+
+import {
+	SimpleOutput,
+	QueryResult,
+	ContionalOutput as ConditionalOutput,
+	ApiMessagesSucceeded,
+	ResponseFromFirebase,
+	ParameterFromQueryResult,
+	Context,
+	SearchOutput,
+	DataParty,
+	Card,
+} from "./../models/session.interfaces";
+import { IntentDetectedParam, SysInterface, SystemType } from "../models/parameter.interface";
+import { messageType } from '../models/whatsapp.model';
+import { MessageContent } from "whatsapp-web.js";
+
+
+
+
+export default class SessionController {
+	
+	private _Contexts: Array<any>;
+	private _parentPath: string;
+	
+
+	// ANCHOR DETECT INTENT (ROOT)
+	public detectIntent = async (
+		msg: messageType,
+		clientSessionId: string,
+		projectId: string,
+		clientId: string,
+		inputContext?: string[]
+	): Promise<MessageContent | void> => {
+		try {
+			
+			// Prepare Dialogflow Session
+			const sessionClient = new SessionsClient( { credentials: keyFilename } );
+			console.log("\x1b[35m%s\x1b[33m", "Session:", clientSessionId )
+			
+			// Define Dialogflow session
+			const sessionId = clientSessionId
+				? clientSessionId
+				: uuidv4();
+			this._Contexts = inputContext ? inputContext : []
+			console.log("\x1b[35m%s\x1b[33m", "Contexts length:", this._Contexts.length )
+
+
+			const sessionPath = sessionClient.projectAgentSessionPath(projectId, sessionId);
+			this._parentPath = sessionPath;
+
+
+			// REVIEW Se integró en el body de la query los contextos pero no se tuvo éxito
+			const request = {
+				session: sessionPath,
+				queryInput: {
+					text: {
+						// The query to send to the dialogflow agent
+						text: msg.body,
+						// The language used by the client (en-US)
+						languageCode: "es",
+					},
+				},
+				queryParams: {
+					contexts: this._Contexts
+				}
+			};
+
+
+			//Inicia la secuenia
+			console.log("\x1b[35m%s\x1b[33m", "Request", request)
+			const response = await sessionClient.detectIntent( request ).then( result => result[ 0 ] );
+			console.log( response )
+			
+			
+			if ( response.queryResult.intent ) {
+				
+				//retrive all contextFromSession:
+				// console.log( 'Respuesta de Dialogflow', response.queryResult );
+				// console.log( 'Contextos', JSON.stringify(response.queryResult.outputContexts))
+				console.log("\x1b[35m%s\x1b[33m", "Intent", response.queryResult.intent.displayName);
+	
+				// console.log(response.queryResult.intent.parameters)
+				// console.log("Antes de llegar a la asginacion: ", req.body);
+				// const agent = new WebhookClient({ request: req, response: res });
+				const sessionResult = <QueryResult>{
+					...response.queryResult,
+					clientId: clientId,
+					sessionId,
+					projectId,
+				};
+	
+				const getRespuestas = await this.retriveMessagesFromFireStore(
+					clientId,
+					projectId,
+					sessionResult.intent.name
+				);
+	
+				// console.log({getRespuestas})
+				if (getRespuestas) {
+					const {answers, outputContexts} = await this.ManageResponsesController(getRespuestas, sessionResult, clientId);
+	
+					// NOTE Revisar la forma de enviar las respuestas de manera adecuada
+					// console.info("\n\tExito!\n\tSe han retornado las siguientes respuestas:\n\t\t", validatedResponses);
+	
+					// if (validatedResponses) {
+					// }
+	
+					// res.status(200).json({
+					// 	message: "Exito",
+					// 	session: sessionId,
+					// 	respuestas: answers,
+					// 	contextos: outputContexts
+					// });
+
+					answers.forEach( answer => {
+						return answer
+					})
+					// return;
+				}
+				
+				return "No se encontro base de datos con ese clientId y projectId"
+				
+			} else {
+				return 
+				
+				
+			}
+		} catch (error) {
+			
+		}
+	};
+
+	// ANCHOR FIND RESPUESTAS FIRESTORE
+	private async retriveMessagesFromFireStore(
+		clientId: string,
+		idProject: string,
+		intentName: string
+	): Promise<Array<ResponseFromFirebase | null>> {
+		// /usuarios/{idUser}/agentes/{idProject}/mensajes/{intentName}/respuestas
+		const idName = intentName.slice(intentName.lastIndexOf("/") + 1);
+
+		const pathToCollection = `/usuarios/${clientId}/agentes/${idProject}/mensajes/${idName}/respuestas`;
+
+		const intentRef = firestore.collection(pathToCollection).orderBy("index", "asc");
+		const respuestas: any[] = [];
+
+		const documents = await intentRef.get();
+
+		documents.forEach(doc => {
+			respuestas.push(doc.data());
+		});
+		console.log( respuestas )
+		return respuestas;
+	}
+
+	// ANCHOR ACTIONS MAP FROM RESPUESTAS
+	protected ManageResponsesController = async (
+		arrayOfAnswer: Array<ResponseFromFirebase>,
+		queryResult: QueryResult,
+		clientId: string
+	) => {
+		const promisesToHandle: Array<Promise<ApiMessagesSucceeded>> = [];
+		const parametersToEvaluate = this._parsedResponseFromDialogflow(
+			<ParameterFromQueryResult>queryResult.parameters
+		);
+		//setNewParams
+		queryResult.parameters = parametersToEvaluate;
+		console.log(parametersToEvaluate);
+
+		// const parameterArray = queryResult.parameters;
+		// this._currentQueryResult.parameters.forEach( function(obj) {
+
+		for (const element of arrayOfAnswer) {
+			element.result.text = this._replaceParameters(parametersToEvaluate, element.result.text);
+			switch (element.tipo) {
+				case "grupo_datos":
+					promisesToHandle.push(
+						this._validateDataGroup(<DataParty>element.result, element.outputContext, parametersToEvaluate)
+					);
+					break;
+				case "buscar":
+					promisesToHandle.push(
+						this._validateSearch(
+							<SearchOutput>element.result,
+							parametersToEvaluate,
+							element.outputContext,
+							clientId
+						)
+					);
+					break;
+				case "condicional":
+					promisesToHandle.push(
+						this._validateConditional(
+							<ConditionalOutput>element.result,
+							element.outputContext,
+							parametersToEvaluate
+						)
+					);
+					break;
+				case "simple":
+					promisesToHandle.push(this._validateSimple(<SimpleOutput>element.result, element.outputContext));
+					break;
+				default:
+					throw new Error("Esa respuesta no la pude procesar");
+			}
+		}
+		
+		// console.log( promisesToHandle )
+		const answers: ApiMessagesSucceeded[] = await Promise.all( promisesToHandle )
+			.catch(error => {
+				console.error("Error en la ejecucion de las validaciones", error);
+				return [...error];
+			} );
+		
+		// console.log( answers )
+		const outputContexts: Array<Context> = [];
+		const errors = [];
+
+			try {
+				for ( const currentResponse of answers ) {
+					// console.log( currentResponse )
+					if ( currentResponse ) {
+						if ( currentResponse.outputContext ) {
+							if ( !outputContexts.find( x => x === currentResponse.outputContext ) ) {
+								const context = await this._createContext( currentResponse.outputContext );
+								// console.log( context )
+								outputContexts.push(context);
+							}
+						}
+					}
+				}
+			} catch (error) {
+				if (error) {
+					console.error('Error en procesando respuesta \n', error)
+					errors.push(error);
+				}
+			}
+			
+			
+		
+		
+
+		return {answers, outputContexts}
+		// const responsesReturned = await this._controllerResponse();
+		// return responsesReturned;
+	};
+
+	// ANCHOR SEARCH
+	private _validateSearch = async (
+		responseToValidate: SearchOutput,
+		parameters: Map<string, any>,
+		outputContext: string,
+		clientId: string
+	): Promise<ApiMessagesSucceeded | null> => {
+		// **************************************** //
+		const value = parameters.get(responseToValidate.parametro);
+		// console.log("\x1b[33m%s\x1b[37m%s", "search criteria", { database: responseToValidate.database, value });
+		// console.log();
+
+		if (responseToValidate.database && value) {
+			console.log("response with search");
+			const pathToCollection = `/usuarios/${clientId}/${responseToValidate.database}`;
+
+			
+			const databaseRef = await firestore
+				.collection(pathToCollection)
+				.where("name", "==", responseToValidate.parametro)
+				.get();
+			const data = [];
+
+			for (const document of databaseRef.docs) {
+				data.push((<any>document.data()) as Card);
+			}
+
+			console.log( "\x1b[33m", 'Response with search' )
+			console.log(  "\x1b[33m", responseToValidate.text )
+			return {
+				text: responseToValidate.text,
+				cards: data,
+				outputContext,
+			};
+		}
+		return null;
+	};
+
+	// ANCHOR CONDITIONAL
+	private _validateConditional = async (
+		responseToValidate: ConditionalOutput,
+		outputContext: string,
+		parameters: Map<string, any>
+	): Promise<ApiMessagesSucceeded | null> => {
+		let resolve = false;
+		const param = responseToValidate.parametro.split("$")[1].split(".")[0];
+		const value = parameters.get(param);
+		// console.log("\x1b[36m%s\x1b[37m", "condition criteria", {
+		// 	value,
+		// 	criterio: responseToValidate.valor,
+		// 	param: param,
+		// });
+
+		// console.log(value);
+		if (value) {
+			switch (responseToValidate.condicion) {
+				case "igual a":
+					if (value === responseToValidate.valor) resolve = true;
+					break;
+				case "diferente a":
+					if (value !== responseToValidate.valor) resolve = true;
+					break;
+				case "mayor que":
+					if (value > responseToValidate.valor) resolve = true;
+					break;
+				case "menor que":
+					if (value < responseToValidate.valor) resolve = true;
+					break;
+				case "mayor o igual que":
+					if (value >= responseToValidate.valor) resolve = true;
+					break;
+				case "menor o igual que":
+					if (value <= responseToValidate.valor) resolve = true;
+					break;
+				default:
+					break;
+			}
+		} else if (responseToValidate.condicion === "no existe" && !value) {
+			resolve = true;
+		} else if (responseToValidate.condicion === "existe" && value) {
+			resolve = true;
+		}
+		if (resolve) {
+			console.log( "\x1b[36m", "Response with condition" );
+			console.log( "\x1b[33m",  responseToValidate.text )
+			return { ...responseToValidate, outputContext };
+		}
+		return null;
+	};
+
+	// ANCHOR DATAGROUP
+	private _validateDataGroup = async (
+		responseToValidate: DataParty,
+		outputContext: string,
+		parameters: Map<string, any>
+	): Promise<ApiMessagesSucceeded | null> => {
+		const value = parameters.get(responseToValidate.parametro);
+
+		// console.log("\x1b[32m%s\x1b[37m", "DataGroup Criteria", { current: value, key: responseToValidate.key });
+
+		if (value) {
+			console.log("\x1b[32m","response with datagroup");
+			await this._createContext( responseToValidate.coleccion );
+			console.log( "\x1b[33m", responseToValidate.text )
+			return { ...responseToValidate, outputContext };
+		}
+		return null;
+	};
+
+	// ANCHOR SIMPLE
+	private _validateSimple = async (
+		responseToValidate: SimpleOutput,
+		outputContext: string
+	): Promise<ApiMessagesSucceeded | null> => {
+		// console.log("\x1b[34m%s\x1b[37m", "simple criteria");
+		// console.log(responseToValidate);
+
+		if ( typeof responseToValidate !== undefined ) {
+			console.log( "\x1b[34m", 'Response with simple' )
+			console.log( "\x1b[33m",  responseToValidate.text )
+			return { ...responseToValidate, outputContext };
+		}
+		return null;
+	};
+
+	// ANCHOR SET CONTEXT
+	private async _createContext(contextString: string, params?: object) {
+		const contextClient = new ContextsClient({ credentials: keyFilename });
+		//The trick on Context is to set it greater that 1 so don't expire when finishing the current process
+		//(in the next call will appear as 1)
+		const context: Context = {
+			name: `${this._parentPath}/contexts/${contextString}`,
+			lifespanCount: 3,
+			parameters: params ? params : undefined,
+		};
+		// projects/<Project ID>/agent/sessions/<Session ID>
+		// Parent string format
+		
+		const contextCreated = await contextClient.createContext({ parent: this._parentPath, context });
+		return new Promise((resolve, reject) => {
+			console.info( "Succefully Created context: ", contextCreated[ 0 ].name.slice(
+				contextCreated[ 0 ].name.lastIndexOf('/') + 1
+			))
+			resolve(contextCreated[0]);
+		});
+	}
+
+	// private async _retriveAllContexts() {
+	// 	const contextClient = new ContextsClient({ credentials: keyFilename });
+	// 	// Parent Format: projects/<Project ID>/agent/sessions/<Session ID>
+	// 	return await contextClient.listContexts({
+	// 		parent: this._parentPath
+	// 	});
+	// }
+
+	private types = new Map<string, SystemType>([
+		["startDateTime", "datetimeperoid"],
+		["street-address", "location"],
+		["startDate", "dateperiod"],
+		["startTime", "timeperiod"],
+		["date_time", "datetime"],
+		["currency", "unitcurrency"],
+		["unit", "duration"],
+		["name", "person"],
+	]);
+
+	// ANCHOR PARAMETERS OF DETECT INTENT
+	private _parsedResponseFromDialogflow = (parameters: ParameterFromQueryResult) => {
+		const newIterator = Object.entries(parameters.fields);
+
+		return new Map(
+			newIterator.map( x => {
+				console.log( '\n', '\x1b[33m%s\x1b[37m', 'x', x, '\n' )
+				const paramValueTypeName = x[ 1 ][ "kind" ];
+				const paramName = x[ 0 ];
+				let paramValue: any
+				console.log( paramValueTypeName )
+				if ( paramValueTypeName === "structValue" ) {
+					const fields = x[ 1 ][ paramValueTypeName ][ "fields" ]
+					// console.log( 'structValue',  fields)
+					paramValue = this._restructParamObject( fields )
+					
+				} else if ( paramValueTypeName === 'listValue' ) {	
+					const values = x[ 1 ][ paramValueTypeName ]['values']
+					// console.log( 'listValue', values )
+					const fields = values[ 0 ][ 'structValue' ][ 'fields' ]
+					// console.log( fields )
+					paramValue = this._restructParamObject( fields )
+					
+				} else {
+					// console.log('otherValue', x[1][paramValueTypeName] )
+					paramValue = x[ 1 ][ paramValueTypeName ]
+				}
+
+				console.log("\x1b[32m%s\x1b[37m", paramName, paramValue);
+
+				return [paramName, paramValue];
+			})
+		);
+	};
+
+	// ANCHOR Replace parameters in text
+	private _replaceParameters( _paramsMap: Map<string, any>, text_: string ) {
+		let text
+		if (text_.includes("$")) {
+			const posibleVariable = text_.split("$")[1].split(" ")[0].split(".");
+			// console.log('\x1b[35m%s\x1b[37m','posibleVariable', posibleVariable)
+			const variable = posibleVariable[0];
+
+			console.log("\x1b[35m%s\x1b[37m", "variable", variable);
+			const value = _paramsMap.get(variable);
+			text = text_.replace(
+				posibleVariable.length > 1
+					? posibleVariable[1] === "original"
+						? `$${variable}.original`
+						: `$${variable}`
+					: `$${variable}`,
+				value
+			);
+			// console.log("\x1b[32m%s\x1b[37m", "text replaced: ", text_);
+		}
+		return text ? text : text_;
+	}
+
+	// ANCHOR Get system entityType name
+	private _getSystemEntityTypeName(object: IntentDetectedParam): SystemType {
+		let entityTypeName: SystemType;
+
+		for (const key of this.types.keys()) {
+			if (key in object) {
+				entityTypeName = this.types.get(key);
+			}
+		}
+
+		return entityTypeName;
+	}
+
+	// ANCHOR Restruct param object
+	private _restructParamObject(object: IntentDetectedParam): SysInterface {
+		let result: any;
+		const entityTypeName: SystemType = this._getSystemEntityTypeName( object );
+		console.log( entityTypeName )
+
+		// Assing date values
+		if (
+			entityTypeName === "datetime" ||
+			entityTypeName === "dateperiod" ||
+			entityTypeName === "datetimeperoid" ||
+			entityTypeName === "timeperiod"
+		) {
+			Object.keys(object).forEach(key => {
+				const kindValue = object[key]["kind"];
+				result[key] = new Date(object[key][kindValue]);
+			});
+		} else if (
+			entityTypeName === "duration" ||
+			entityTypeName === "unitcurrency" ||
+			entityTypeName === "location"
+		) {
+			Object.keys(object).forEach(key => {
+				const kindValue = object[key]["kind"];
+				result[key] = object[key][kindValue];
+			});
+		} else {
+			const kindValue = object["name"]["kind"];
+			result = object["name"][kindValue];
+		}
+
+		console.log( result );
+		return result;
+	}
+}

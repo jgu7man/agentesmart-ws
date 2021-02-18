@@ -1,5 +1,5 @@
 import * as admin from "firebase-admin";
-import serviceAccount from "./secret/main-agentesmart-589511385b0d.json";
+import serviceAccount from "./secret/credentials.json";
 
 export const ACCOUNT: any = serviceAccount;
 

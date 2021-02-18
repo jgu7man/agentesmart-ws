@@ -15,7 +15,11 @@ export class WhatsappClient {
 		takeoverTimeoutMs: 5000,
 		takeoverOnConflict: true,
 	});
-	constructor() {}
+  constructor () { }
+  
+  private whatsappRef:FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>
+  private whatsappDoc: FirebaseFirestore.DocumentSnapshot<FirebaseFirestore.DocumentData>
+  private projectId: string
 
 	public contection(server: http.Server, path: string) {
 		const wss = new WebSocket.Server({ server, path });
@@ -23,122 +27,58 @@ export class WhatsappClient {
 		wss.on("connection", async (ws: WebSocket, req) => {
 			
       try {
-        // Validate URL
-			  const params = await this.validateURL( req.url)
-			
-        // Validate project ID
-				const projectId = params.split("=")[1];
-				console.log("Connecting with: " + projectId);
-        const agentsQuery = await this.validateProject(projectId)
+        await this.validateURL( req.url)
         
-					const projectPath = agentsQuery.docs[0].ref.path;
 
-					// Validate payStatus
-					const payStatusRef = firestore.doc(`${projectPath}/cuenta/estado`);
-          const payStatusDoc = await payStatusRef.get();
-          // NOTE Activar la existencia de documento para la validación de pago
-					if (payStatusDoc.exists) {
-						console.log("Client don't have billing permissions");
-						ws.send(
-							JSON.stringify({
-								type: "error",
-								message:
-									"Tu cuenta es gratuita, por ello aún no puedes acceder a esta función, ve a la sección de cuenta para activar un plan supuerior.",
-								status: "DISCONNECTED",
-							})
-						);
-						ws.onclose = () => {
-							console.log("Connection closed");
-						};
-						ws.close();
-					} else {
-						// Validate session
-						const whatsappRef = firestore.doc(`${projectPath}/integraciones/whatsapp`);
-						const whatsappDoc = await whatsappRef.get();
-						const session = whatsappDoc.exists
-							? whatsappDoc.data()["session"]
-								? whatsappDoc.data()["session"]
-								: null
-							: null;
-						console.log("Running session:", session ? session : "New");
-						const client = new Client({
-							session: session,
-							qrTimeoutMs: 30000,
-							restartOnAuthFail: false,
-							takeoverTimeoutMs: 5000,
-							takeoverOnConflict: true,
-							puppeteer: {
-								args: ["--no-sandbox", "--disable-setuid-sandbox"],
-							},
-						});
+        const agentsQuery = await this.validateProject(this.projectId)
+				const projectPath = agentsQuery.docs[0].ref.path;
+      
+      
+        // Validate payStatus
+        await this.validatePayStatus( projectPath )
+        
 
-						client.initialize();
-						console.log(client.info ? `Connecting session to: ${client.info}` : "Waiting for QR scanning");
+        // Validate session
+        this.whatsappRef = firestore.doc(`${projectPath}/integraciones/whatsapp`);
+        this.whatsappDoc = await this.whatsappRef.get();
+        
+        const session = this.whatsappDoc.exists
+          ? this.whatsappDoc.data()["session"]
+            ? this.whatsappDoc.data()["session"]
+            : null
+          : null;
+       
 
-						let qrCant = 0;
+        const client = await this.createClient(session)
+              client.initialize();
+        
+        console.log(client.info ? `Connecting session to: ${client.info}` : "Waiting for QR scanning");
+
+
 						client.on("qr", (qr: string) => {
-							qrCant += 1;
-							// Generate and scan this code with your phone
-
-							if (qrCant === 4) {
-								whatsappRef.update({
-                  session: firebase.firestore.FieldValue.delete(),
-                  qr: firebase.firestore.FieldValue.delete(),
-									status: "DISCONNECTED",
-								});
-
-                ws.send( JSON.stringify( {
-                  type: 'error',
-                  message: 'Se acabó el tiempo de espera de conección, vuleve a generar código', 
-                  status: 'DISCONNECTED'
-                }))
-								client.destroy();
-								ws.onclose = () => {
-									console.error("max qr events emited");
-								};
-								ws.close();
-							} else {
-								if (qrCant === 1 && !whatsappDoc.exists) whatsappRef.set({ status: "DISCONNECTED" });
-
-								console.log("QR RECEIVED", qr);
-								whatsappRef.update({ qr });
-								ws.send(
-									JSON.stringify({
-										type: "ok",
-										message: "Instancia de watsapp creada, esperando conexxión",
-										status: "DISCONNECTED",
-									})
-								);
-							}
+							this.qrEvents(ws, client, qr)
 						});
 
 						client.on("authenticated", (session: WAWebJS.ClientSession) => {
 							console.log("AUTHENTICATED", session);
 							session = session;
-							whatsappRef.update({ session });
+							this.whatsappRef.update({ session });
 						});
 
 						client.on("auth_failure", (msg: string) => {
 							// Fired if session restore was unsuccessfull
-							whatsappRef.update({
+							this.whatsappRef.update({
 								session: firebase.firestore.FieldValue.delete(),
 								status: "DISCONNECTED",
 							});
-							client.destroy();
-							ws.send(JSON.stringify({
-                type: "error",
-                message: "No se pudo contectar con whatsapp, inténtalo de nuevo",
-                status: "DISCONNECTED",
-              }));
-							ws.onclose = () => {
-								console.error("AUTHENTICATION FAILURE", msg);
-							};
-							ws.close();
+              client.destroy();
+              throw new (CustomException("No se pudo contectar con whatsapp, inténtalo de nuevo", 'DISCONNECT') as any)
+						
 						});
 
 						client.on("ready", () => {
 							console.log("Client is ready!");
-							whatsappRef.update({
+							this.whatsappRef.update({
 								status: "CONNECTED",
 								qr: firebase.firestore.FieldValue.delete(),
 							});
@@ -147,20 +87,12 @@ export class WhatsappClient {
 
 						client.on("disconnected", (reason: WAWebJS.WAState) => {
 							console.log("Client was logged out", reason);
-							whatsappRef.update({
+							this.whatsappRef.update({
 								status: "DISCONNECTED",
 								session: firebase.firestore.FieldValue.delete(),
 							});
-							ws.send(JSON.stringify({
-                type: "ok",
-                message: "El cliente se decidió desconectarse",
-                status: "DISCONNECTED",
-              }));
-							client.destroy();
-							ws.onclose = () => {
-								console.log(`${projectId} logout`);
-							};
-							ws.close();
+              client.destroy();
+							throw new (CustomException("El cliente se decidió desconectarse", 'DISCONNECT') as any)
 						});
 
 						client.on("message", async (msg: messageType) => {
@@ -171,16 +103,16 @@ export class WhatsappClient {
 							console.log("tipo mensaje: ", msg.type);
 							console.log("author: ", msg.author);
 							console.log("from: ", msg.from);
-							console.log(projectId + " recibe:", msg.body);
+							console.log(this.projectId + " recibe:", msg.body);
 							console.log("\n");
 
 							if (msg.body === "!STATUS") {
 								client.sendMessage(
 									msg.from,
 									`
-                                    *Agente conectado*
-                                    projectId: _${projectId}_
-                                `
+                  *Agente conectado*
+                   projectId: _${this.projectId}_
+                  `
 								);
 							}
 
@@ -200,19 +132,11 @@ export class WhatsappClient {
 							//      msg.reply(new Location(37.422, -122.084, 'Googleplex\nGoogle Headquarters'));
 							//  });
 						});
-					}
+					
       
       } catch ( error ) {
         console.log(error)
-        ws.send(JSON.stringify({
-          type: "error",
-          message: error.message,
-          status: "DISCONNECTED",
-        }));
-        ws.onclose = () => {
-          console.log("Connection closed");
-        };
-        ws.close();
+        this.closeSession(ws, error.message)
       }
       
       
@@ -221,9 +145,25 @@ export class WhatsappClient {
   }
   
 
-  private async validateURL( url:string, ) {
+  private closeSession( ws: WebSocket, message: string) {
+    ws.send(JSON.stringify({
+      type: "error",
+      message: message,
+      status: "DISCONNECTED",
+    }));
+    ws.onclose = () => {
+      console.log("Connection closed");
+    };
+    ws.close();
+  }
+
+  private async validateURL( url: string, ) {
+    // Validate project ID
     try {
-      return url ? url.split("?")[1] : null;
+      const params = url ? url.split( "?" )[ 1 ] : null;
+      this.projectId = params.split("=")[1];
+      console.log("Connecting with: " + this.projectId);
+      return this.projectId
     } catch ( error ) {
       throw new Error("Conexión invalida, la ruta no contiene parámetros");      
     }
@@ -243,22 +183,88 @@ export class WhatsappClient {
       
       let error = new Error( "Agente no encontrado o no es válido" );
       error.message = "Agente no encontrado o no es válido" 
-      throw new (CustomException as any)("Agente no encontrado o no es válido" )
+      throw new (CustomException("Agente no encontrado o no es válido", 'UNCONNECTED' ) as any)
       } else {
         return agentsQuery
       }
 
   }
 
+	
+  private async validatePayStatus(projectPath: string) {
+    const payStatusRef = firestore.doc(`${projectPath}/cuenta/estado`);
+    const payStatusDoc = await payStatusRef.get();
+    // NOTE Activar la existencia de documento para la validación de pago
+    if ( payStatusDoc.exists ) {
+      throw new (CustomException(
+        "Tu cuenta es gratuita, por ello aún no puedes acceder a esta función, ve a la sección de cuenta para activar un plan supuerior.", 'UNCONNECTED'
+      )as any)
+      
+    } else {
+      return true
+    }
+  }
 
-  
+  private async createClient( session: any,  ) {
+    try {
+      
+      console.log("Running session:", session ? session : "New");
+      const client = new Client({
+        session: session,
+        qrTimeoutMs: 30000,
+        restartOnAuthFail: false,
+        takeoverTimeoutMs: 5000,
+        takeoverOnConflict: true,
+        puppeteer: {
+          args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        },
+      } );
+      return client
+    } catch ( error ) {
+      throw new (CustomException( "No se pudo crear el cliente de whatsappweb", 'UNCONNECTED' )as any)
+    }
+  }
+
+
+  private async qrEvents(ws: WebSocket, client:WAWebJS.Client, qr:string ) {
+    let qrCant = 0;
+    qrCant += 1;
+    // Generate and scan this code with your phone
+
+    if (qrCant === 4) {
+      this.whatsappRef.update({
+        session: firebase.firestore.FieldValue.delete(),
+        qr: firebase.firestore.FieldValue.delete(),
+        status: "DISCONNECTED",
+      });
+
+      client.destroy();
+      throw new (CustomException('Se acabó el tiempo de espera de conección, vuleve a generar código', 'DISCONNECT') as any )
+      
+    } else {
+      if (qrCant === 1 && !this.whatsappDoc.exists) this.whatsappRef.set({ status: "DISCONNECTED" });
+
+      console.log("QR RECEIVED", qr);
+      this.whatsappRef.update({ qr });
+      ws.send(
+        JSON.stringify({
+          type: "ok",
+          message: "Instancia de watsapp creada, esperando conexxión",
+          status: "DISCONNECTED",
+        })
+      );
+    }
+  }
 }
 
-function CustomException(message:string) {
+function CustomException(message:string, code: ErrorCode) {
   const error = new Error(message);
 
-  error.message = message;
+	error.message = message;
+	error.stack = code
   return error;
 }
+
+type ErrorCode = 'DISCONNECT' | 'UNCONNECTED' 
 
 CustomException.prototype = Object.create(Error.prototype)

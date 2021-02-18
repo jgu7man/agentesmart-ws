@@ -5,6 +5,10 @@ import {  Connections } from './index.routes';
 // const { Client } = require('whatsapp-web.js');
 // const client = new Client();
 
+import serviceAccount from "./secret/credentials.json";
+
+export const keyFilename = serviceAccount;
+
 
 const app = express();
 // const routes = new Routes()
